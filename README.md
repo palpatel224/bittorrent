@@ -3,21 +3,30 @@
 This project is a BitTorrent client implemented in Go using the Bittorrent protocol. The client is capable of connecting to peers, requesting pieces of a file, and validating the received pieces using SHA-1 hashes. 
 The main functionality is contained within the main.go file, which handles the connection to peers, sending requests for pieces, and receiving and validating the pieces.
 
-## How to use
-```bash
-go run src/main.go <your-torrent-file>
-```
-Example:
-You can clone the given repository and use the sample.torrent file
-```bash
-git clone https://github.com/vg239/bittorrent.git
-```
 
-```bash
-go run src/main.go sample.torrent
-```
+## How to Use
 
-The output of the file can be seen in the sample.txt
+1. **Clone the repository**:
+    ```sh
+    git clone https://github.com/vg239/bittorrent.git
+    cd repository
+    ```
+
+2. **Install dependencies**:
+    ```sh
+    go get ./...
+    ```
+
+3. **Run for an example torrent fie**:
+    ```sh
+    go run src/main.go sample.torrent
+     ```
+    **or for some other torrent file**
+    ```sh
+    go run src/main.go <path-to-torrent-file>
+    ```
+
+The output of the exmaple file can be seen in the sample.txt or in the respective file name.
 
 ## Working
 1) The client starts by reading a .torrent file to extract the necessary metadata, including the info hash, piece length, and the list of peers. 
