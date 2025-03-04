@@ -6,24 +6,37 @@ The main functionality is contained within the main.go file, which handles the c
 
 ## How to Use
 
+### GUI
+**Make sure you have the latest version of Go installed along with some platform dependencies for gui**
+```sh
+sudo apt-get install gcc libgl1-mesa-dev xorg-dev
+```
+### BitTorrent Client
+
 1. **Clone the repository**:
     ```sh
     git clone https://github.com/vg239/bittorrent.git
-    cd repository
+    cd bittorrent-client
     ```
 
 2. **Install dependencies**:
     ```sh
-    go get ./...
+    go mod tidy
     ```
 
-3. **Run for an example torrent fie**:
+3. **Build the application**:
     ```sh
-    go run src/main.go sample.torrent
-     ```
-    **or for some other torrent file**
+    go build -o bittorrent-client src/*.go
+    ```
+
+4. **Use GUI**:
     ```sh
-    go run src/main.go <path-to-torrent-file>
+    ./bittorrent-client
+    ```
+
+5. **Use CLI**:
+    ```sh
+    ./bittorrent-client --cli <path-to-torrent-file>
     ```
 
 The output of the exmaple file can be seen in the sample.txt or in the respective file name.

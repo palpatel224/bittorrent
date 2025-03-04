@@ -152,7 +152,14 @@ func receivePiece(conn net.Conn, expectedLength int) ([]byte, error) {
 //     return bytes.Equal(hash[:], expectedHash)
 // }
 
-func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile) {
+// Define a struct to hold piece download results
+type pieceResult struct {
+    index int
+    data  []byte
+    err   error
+}
+
+func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile, resultChan chan<- pieceResult, pieceQueue <-chan int) {
     conn, err := net.DialTimeout("tcp", address, 5*time.Second)
     if err != nil {
         fmt.Printf("Error connecting to peer %s: %v\n", address, err)
@@ -174,7 +181,7 @@ func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile)
         return
     }
 
-    fmt.Printf("Received handshake response from peer %s: %x\n", address, response)
+    fmt.Printf("Received handshake response from peer %s\n", address)
 
     // Send Interested message
     err = sendInterested(conn)
@@ -192,16 +199,15 @@ func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile)
 
     fmt.Printf("Peer %s unchoked us\n", address)
 
-    // Initialize a slice to store the pieces
-    pieceLength := torrent.Info.PieceLength
-    fileLength := torrent.Info.Length
-    numPieces := (fileLength + pieceLength - 1) / pieceLength
-    pieces := make([][]byte, numPieces)
-    blockSize := 1 << 14 // 16 KB
+    // Download pieces assigned to this connection
+    for pieceIndex := range pieceQueue {
+        pieceLength := torrent.Info.PieceLength
+        fileLength := torrent.Info.Length
+        numPieces := (fileLength + pieceLength - 1) / pieceLength
+        blockSize := 1 << 14 // 16 KB
 
-    for pieceIndex := 0; pieceIndex < numPieces; pieceIndex++ {
         var pieceBuffer []byte // Buffer to store concatenated blocks for this piece
-        fmt.Print("\n\n\n\n")
+        
         currentPieceLength := pieceLength
         if pieceIndex == numPieces-1 { // Last piece
             currentPieceLength = torrent.Info.Length % pieceLength
@@ -209,31 +215,29 @@ func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile)
                 currentPieceLength = pieceLength
             }
         }
-        fmt.Printf("Downloading piece %d, length %d\n", pieceIndex, currentPieceLength)
-        fmt.Print("\n")
-        for begin := 0; begin < pieceLength; begin += blockSize {
+        fmt.Printf("[Peer %s] Downloading piece %d, length %d\n", address, pieceIndex, currentPieceLength)
+        
+        for begin := 0; begin < currentPieceLength; begin += blockSize {
             length := blockSize
             if begin+length > currentPieceLength {
                 length = currentPieceLength - begin // Handle last block
             }
     
-            fmt.Printf("Requesting block at piece %d, offset %d, length %d\n", pieceIndex, begin, length)
-    
             // Request the block from the peer
             err = requestPiece(conn, pieceIndex, begin, length)
             if err != nil {
-                fmt.Printf("Error requesting block at piece %d, offset %d: %v\n", pieceIndex, begin, err)
+                fmt.Printf("[Peer %s] Error requesting block at piece %d, offset %d: %v\n", address, pieceIndex, begin, err)
+                resultChan <- pieceResult{index: pieceIndex, data: nil, err: err}
                 return
             }
     
             // Receive the block from the peer
             block, err := receivePiece(conn, length)
             if err != nil {
-                fmt.Printf("Error receiving block at piece %d, offset %d: %v\n", pieceIndex, begin, err)
+                fmt.Printf("[Peer %s] Error receiving block at piece %d, offset %d: %v\n", address, pieceIndex, begin, err)
+                resultChan <- pieceResult{index: pieceIndex, data: nil, err: err}
                 return
             }
-    
-            fmt.Printf("Received block at piece %d, offset %d, length %d\n", pieceIndex, begin, length)
     
             // Append the block to the piece buffer
             pieceBuffer = append(pieceBuffer, block...)
@@ -245,48 +249,134 @@ func handlePeerConnection(address, infoHash, peerID string, torrent TorrentFile)
     
         // Validate the piece
         if bytes.Equal(computedHash[:], expectedHash) {
-            fmt.Printf("Piece %d validated successfully\n", pieceIndex)
-            pieces[pieceIndex] = pieceBuffer // Store the validated piece
+            fmt.Printf("[Peer %s] Piece %d validated successfully\n", address, pieceIndex)
+            resultChan <- pieceResult{index: pieceIndex, data: pieceBuffer, err: nil}
             err = sendHave(conn, pieceIndex)
             if err != nil {
-                fmt.Printf("Error sending Have message for piece %d to peer %s: %v\n", pieceIndex, address, err)
-                return
+                fmt.Printf("[Peer %s] Error sending Have message for piece %d: %v\n", address, pieceIndex, err)
             }
         } else {
-            fmt.Printf("Piece %d validation failed. Retrying...\n", pieceIndex)
-            // Optionally retry the piece here if validation fails
+            fmt.Printf("[Peer %s] Piece %d validation failed\n", address, pieceIndex)
+            resultChan <- pieceResult{index: pieceIndex, data: nil, err: fmt.Errorf("piece validation failed")}
+        }
+    }
+}
+
+// Download torrent using multiple peers in parallel
+func downloadTorrent(torrent TorrentFile, infoHashHex string, peerID string, peers []string) error {
+    pieceLength := torrent.Info.PieceLength
+    fileLength := torrent.Info.Length
+    numPieces := (fileLength + pieceLength - 1) / pieceLength
+    
+    // Create channels for work distribution and result collection
+    resultChan := make(chan pieceResult)
+    pieceQueues := make([]chan int, len(peers))
+    
+    // Create a slice to store the pieces
+    pieces := make([][]byte, numPieces)
+    
+    // Create a map to track which pieces are being downloaded
+    inProgress := make(map[int]bool)
+    
+    // Create a slice to track which pieces need to be downloaded
+    var pendingPieces []int
+    for i := 0; i < numPieces; i++ {
+        pendingPieces = append(pendingPieces, i)
+    }
+    
+    // Start a goroutine for each peer
+    for i, peer := range peers {
+        pieceQueues[i] = make(chan int, 5) // Buffer for 5 pieces
+        go handlePeerConnection(peer, infoHashHex, peerID, torrent, resultChan, pieceQueues[i])
+    }
+    
+    // Start a goroutine to distribute work
+    go func() {
+        for len(pendingPieces) > 0 || len(inProgress) > 0 {
+            // Assign pending pieces to available peers
+            for _, queue := range pieceQueues {
+                if len(pendingPieces) == 0 {
+                    break
+                }
+                
+                select {
+                case queue <- pendingPieces[0]:
+                    inProgress[pendingPieces[0]] = true
+                    pendingPieces = pendingPieces[1:]
+                default:
+                    // Queue is full, try next peer
+                    continue
+                }
+            }
+            
+            // Wait for results
+            result := <-resultChan
+            delete(inProgress, result.index)
+            
+            if result.err != nil {
+                // If a piece failed, put it back in the pending list
+                pendingPieces = append(pendingPieces, result.index)
+                fmt.Printf("Piece %d failed, re-queuing\n", result.index)
+            } else {
+                // Store the successful piece
+                pieces[result.index] = result.data
+                fmt.Printf("Piece %d downloaded successfully (%d/%d)\n", 
+                    result.index, numPieces-len(pendingPieces)-len(inProgress), numPieces)
+            }
+        }
+        
+        // Close all piece queues when done
+        for _, queue := range pieceQueues {
+            close(queue)
+        }
+    }()
+    
+    // Wait for all pieces to be downloaded
+    for i := 0; i < numPieces; i++ {
+        if pieces[i] == nil {
+            i--
+            time.Sleep(100 * time.Millisecond)
         }
     }
     
-
     // Write the pieces to a file
     outputFile, err := os.Create(torrent.Info.Name)
     if err != nil {
-        fmt.Printf("Error creating output file: %v\n", err)
-        return
+        return fmt.Errorf("error creating output file: %v", err)
     }
     defer outputFile.Close()
-
+    
     for _, piece := range pieces {
         if piece != nil {
             _, err = outputFile.Write(piece)
             if err != nil {
-                fmt.Printf("Error writing piece to file: %v\n", err)
-                return
+                return fmt.Errorf("error writing piece to file: %v", err)
             }
         }
     }
-
+    
     fmt.Printf("File %s downloaded successfully\n", torrent.Info.Name)
+    return nil
 }
 
 func main() {
-    if len(os.Args) < 2 {
-        fmt.Println("Usage: main <path to .torrent file>")
-        return
+    if len(os.Args) > 1 && os.Args[1] == "--cli" {
+        // CLI mode
+        if len(os.Args) < 3 {
+            fmt.Println("Usage: main --cli <path to .torrent file>")
+            return
+        }
+        
+        filePath := os.Args[2]
+        runCLI(filePath)
+    } else {
+        // GUI mode
+        LaunchGUI()
     }
+}
 
-    filePath := os.Args[1]
+func runCLI(filePath string) {
+    // Original CLI code
     file, err := os.Open(filePath)
     if err != nil {
         fmt.Printf("Error opening file: %v\n", err)
@@ -357,13 +447,20 @@ func main() {
     fmt.Printf("Tracker response interval: %d seconds\n", trackerResp.Interval)
 
     // Process peers
+    var peerAddresses []string
     peers := []byte(trackerResp.Peers)
     for i := 0; i < len(peers); i += 6 {
         ip := fmt.Sprintf("%d.%d.%d.%d", peers[i], peers[i+1], peers[i+2], peers[i+3])
         port := int(peers[i+4])<<8 + int(peers[i+5])
         address := fmt.Sprintf("%s:%d", ip, port)
         fmt.Printf("Peer: %s\n", address)
+        peerAddresses = append(peerAddresses, address)
+    }
 
-        handlePeerConnection(address, infoHashHex, "-PC0001-123456789012", torrent)
+    // Download the torrent using multiple peers in parallel
+    err = downloadTorrent(torrent, infoHashHex, "-PC0001-123456789012", peerAddresses)
+    if err != nil {
+        fmt.Printf("Error downloading torrent: %v\n", err)
+        return
     }
 }
