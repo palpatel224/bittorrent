@@ -3,6 +3,7 @@
 This project is a BitTorrent client implemented in Go using the Bittorrent protocol. The client is capable of connecting to peers, requesting pieces of a file, and validating the received pieces using SHA-1 hashes. 
 The main functionality is contained within the main.go file, which handles the connection to peers, sending requests for pieces, and receiving and validating the pieces.
 
+A report post analyzing results using different network conditions, peer handling and piece sizes has been added here : <a href= "https://drive.google.com/file/d/1JrY8lA2z0Le2DXva6bTLqklNDD17I_kb/view">Report Link</a>
 
 ## How to Use
 
